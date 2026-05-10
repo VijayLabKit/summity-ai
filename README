@@ -1,0 +1,62 @@
+# Summity AI
+
+Summity AI is a local full-stack AI text summarization platform. It accepts pasted text or PDF files, sends the content to a backend API, summarizes it with Gemini AI, and displays a structured summary with keywords.
+
+## Features
+
+- Text input summarization
+- PDF upload summarization
+- Backend-based Gemini API integration
+- API key stored securely in backend environment variables
+- Summary length options
+- Paragraph or bullet point output
+- Multi-language output
+- Keyword extraction
+- Copy summary
+- Download summary as TXT
+- Responsive UI for mobile, tablet, and desktop
+- Long document chunking
+- Clear error handling
+
+## Tech Stack
+
+Frontend:
+- React
+- Vite
+- Tailwind CSS
+- Lucide React
+
+Backend:
+- Node.js
+- Express
+- Multer
+- pdf-parse
+- Gemini API
+
+## Folder Structure
+
+```txt
+Summity-AI-project/
+├── backend/
+│   ├── routes/
+│   │   └── summarize.js
+│   ├── utils/
+│   │   └── extractPdfText.js
+│   ├── .env
+│   ├── .env.example
+│   ├── package.json
+│   └── server.js
+│
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── index.css
+│   │   └── main.jsx
+│   ├── index.html
+│   ├── package.json
+│   ├── postcss.config.js
+│   ├── tailwind.config.js
+│   └── vite.config.js
+│
+├── .gitignore
+└── README.md
