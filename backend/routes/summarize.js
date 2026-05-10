@@ -4,12 +4,12 @@ import { extractPdfText } from "../utils/extractPdfText.js";
 
 const router = express.Router();
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
-const MAX_CHUNK_SIZE = 12000;
-const MAX_PARALLEL_CHUNKS = 3;
+const MAX_CHUNK_SIZE = 10000;
+const MAX_PARALLEL_CHUNKS = 2;
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -52,6 +52,7 @@ function getLengthInstruction(summaryLength) {
 
 function createPrompt({ summaryLength, format, language }) {
   const lengthInstruction = getLengthInstruction(summaryLength);
+
   const formatInstruction =
     format === "bullets"
       ? `Write the summary as bullet points.
@@ -59,6 +60,7 @@ Each bullet must be on a separate new line.
 Each bullet must start with "- ".
 Do not write the bullet summary as one paragraph.`
       : "Write the summary as cohesive paragraphs with natural flow.";
+
   return `
 You are a professional academic and business summarization assistant.
 
@@ -70,7 +72,6 @@ Requirements:
 - Extract 5 to 8 important topical keywords.
 - Return only valid JSON.
 - Do not include markdown formatting except simple "- " bullet prefixes when bullet format is requested.
-- Do not include explanations outside JSON.
 
 JSON format:
 {
@@ -125,76 +126,61 @@ function isRetryableStatus(status) {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-function safeParseGeminiResponse(data) {
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!text) {
-    throw new Error("Gemini returned an empty response.");
-  }
+function extractJson(text) {
+  const cleaned = text
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .trim();
 
   try {
-    const parsed = JSON.parse(text);
-
-    return {
-      summary: typeof parsed.summary === "string" ? parsed.summary.trim() : "",
-      keywords: Array.isArray(parsed.keywords)
-        ? parsed.keywords.filter((keyword) => typeof keyword === "string").slice(0, 8)
-        : []
-    };
+    return JSON.parse(cleaned);
   } catch {
-    throw new Error("Gemini returned a response that could not be parsed as JSON.");
+    const match = cleaned.match(/\{[\s\S]*\}/);
+
+    if (!match) {
+      throw new Error("AI returned a response that could not be parsed as JSON.");
+    }
+
+    return JSON.parse(match[0]);
   }
 }
 
-async function callGemini(prompt, text, attempt = 0) {
-  const apiKey = process.env.GEMINI_API_KEY;
+async function callGroq(prompt, text, attempt = 0) {
+  const apiKey = process.env.GROQ_API_KEY;
 
-  if (!apiKey || apiKey === "your_actual_api_key_here") {
-    throw new Error("GEMINI_API_KEY is missing or invalid in the backend .env file.");
+  if (!apiKey) {
+    throw new Error("GROQ_API_KEY is missing in Render environment variables.");
   }
 
   const payload = {
-    contents: [
+    model: GROQ_MODEL,
+    temperature: 0.3,
+    response_format: {
+      type: "json_object"
+    },
+    messages: [
+      {
+        role: "system",
+        content: prompt
+      },
       {
         role: "user",
-        parts: [
-          {
-            text: `${prompt}\n\nContent:\n${text}`
-          }
-        ]
+        content: `Content:\n${text}`
       }
-    ],
-    generationConfig: {
-      temperature: 0.3,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        properties: {
-          summary: {
-            type: "STRING"
-          },
-          keywords: {
-            type: "ARRAY",
-            items: {
-              type: "STRING"
-            }
-          }
-        },
-        required: ["summary", "keywords"]
-      }
-    }
+    ]
   };
 
-  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+  const response = await fetch(GROQ_API_URL, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify(payload)
   });
 
   if (!response.ok) {
-    let message = `Gemini API error: ${response.status}`;
+    let message = `Groq API error: ${response.status}`;
 
     try {
       const errorData = await response.json();
@@ -206,20 +192,27 @@ async function callGemini(prompt, text, attempt = 0) {
     if (isRetryableStatus(response.status) && attempt < 3) {
       const delay = 1000 * Math.pow(2, attempt);
       await sleep(delay);
-      return callGemini(prompt, text, attempt + 1);
+      return callGroq(prompt, text, attempt + 1);
     }
 
     throw new Error(message);
   }
 
   const data = await response.json();
-  const parsed = safeParseGeminiResponse(data);
+  const content = data?.choices?.[0]?.message?.content;
 
-  if (!parsed.summary) {
-    throw new Error("Gemini returned an empty summary.");
+  if (!content) {
+    throw new Error("AI returned an empty response.");
   }
 
-  return parsed;
+  const parsed = extractJson(content);
+
+  return {
+    summary: typeof parsed.summary === "string" ? parsed.summary.trim() : "",
+    keywords: Array.isArray(parsed.keywords)
+      ? parsed.keywords.filter((keyword) => typeof keyword === "string").slice(0, 8)
+      : []
+  };
 }
 
 async function summarizeChunksSequentially(chunks) {
@@ -238,7 +231,7 @@ Return only valid JSON:
   for (let i = 0; i < chunks.length; i += MAX_PARALLEL_CHUNKS) {
     const batch = chunks.slice(i, i + MAX_PARALLEL_CHUNKS);
     const batchResults = await Promise.all(
-      batch.map((chunk) => callGemini(chunkPrompt, chunk))
+      batch.map((chunk) => callGroq(chunkPrompt, chunk))
     );
 
     results.push(...batchResults);
@@ -249,7 +242,7 @@ Return only valid JSON:
 
 async function processTextWithChunking(text, finalPrompt) {
   if (text.length <= MAX_CHUNK_SIZE) {
-    const result = await callGemini(finalPrompt, text);
+    const result = await callGroq(finalPrompt, text);
 
     return {
       summary: result.summary,
@@ -265,7 +258,7 @@ async function processTextWithChunking(text, finalPrompt) {
     .map((result, index) => `Section ${index + 1}:\n${result.summary}`)
     .join("\n\n");
 
-  const finalResult = await callGemini(finalPrompt, combinedChunkSummaries);
+  const finalResult = await callGroq(finalPrompt, combinedChunkSummaries);
 
   const mergedKeywords = [
     ...new Set([
@@ -330,7 +323,7 @@ router.post("/", upload.single("pdf"), async (req, res) => {
         inputLength: contentToProcess.length,
         chunked: result.chunked,
         chunkCount: result.chunkCount,
-        model: GEMINI_MODEL
+        model: GROQ_MODEL
       }
     });
   } catch (error) {
